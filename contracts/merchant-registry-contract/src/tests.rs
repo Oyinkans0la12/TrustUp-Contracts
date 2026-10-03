@@ -2,8 +2,9 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Env, String,
+    symbol_short,
+    testutils::{Address as _, Events, Ledger},
+    Address, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 /// Helper function to set up the environment, contract, and test addresses.
@@ -134,4 +135,73 @@ fn test_set_merchant_status() {
     let fake_admin = Address::generate(&env);
     let res = client.try_set_merchant_status(&fake_admin, &merchant, &false);
     assert!(res.is_err());
+}
+
+#[test]
+fn it_emits_merchant_registered_event_with_metadata() {
+    let env = Env::default();
+    let (client, admin, merchant) = setup(&env);
+    env.mock_all_auths();
+
+    let name = String::from_str(&env, "Orion Traders");
+    client.register_merchant(&admin, &merchant, &name);
+
+    let events: Vec<(Address, Vec<Val>, Val)> = env.events().all();
+    let mut found_event = false;
+    for event in events.iter() {
+        let topics = event.1.clone();
+        let event_type: Symbol = topics.get(0).unwrap().into_val(&env);
+
+        if event_type == symbol_short!("MERCHTREG") {
+            // The registered merchant is an indexed topic.
+            let event_merchant: Address = topics.get(1).unwrap().into_val(&env);
+            assert_eq!(event_merchant, merchant);
+
+            // The payload carries the metadata stored for the merchant.
+            let event_name: String = event.2.into_val(&env);
+            assert_eq!(event_name, name);
+
+            let info = client.get_merchant_info(&merchant);
+            assert_eq!(info.name, event_name);
+            assert_eq!(info.active, true);
+
+            found_event = true;
+            break;
+        }
+    }
+
+    assert!(found_event, "MERCHTREG event not found");
+}
+
+#[test]
+fn it_emits_merchant_status_event_on_toggle() {
+    let env = Env::default();
+    let (client, admin, merchant) = setup(&env);
+    env.mock_all_auths();
+
+    let name = String::from_str(&env, "Sirius Supplies");
+    client.register_merchant(&admin, &merchant, &name);
+
+    client.deactivate_merchant(&admin, &merchant);
+    client.activate_merchant(&admin, &merchant);
+
+    let expected_topic = Symbol::new(&env, "MERCHTSTATUS");
+    let events: Vec<(Address, Vec<Val>, Val)> = env.events().all();
+
+    let mut status_events: Vec<bool> = Vec::new(&env);
+    for event in events.iter() {
+        let topics = event.1.clone();
+        let event_type: Symbol = topics.get(0).unwrap().into_val(&env);
+
+        if event_type == expected_topic {
+            let event_merchant: Address = topics.get(1).unwrap().into_val(&env);
+            assert_eq!(event_merchant, merchant);
+            status_events.push_back(event.2.into_val(&env));
+        }
+    }
+
+    // Deactivation then activation must both be reported.
+    assert_eq!(status_events.len(), 2);
+    assert_eq!(status_events.get(0).unwrap(), false);
+    assert_eq!(status_events.get(1).unwrap(), true);
 }
